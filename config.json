@@ -12,7 +12,9 @@
         "baslangic_mum_sayisi": 200,
         "coin_listesi": [
             "BTCUSDT", "ETHUSDT", "XRPUSDT", "TRXUSDT", "ADAUSDT",
-            "AVAXUSDT", "DOGEUSDT", "SOLUSDT", "ATOMUSDT", "NEARUSDT"
+            "AVAXUSDT", "DOGEUSDT", "SOLUSDT", "ATOMUSDT", "NEARUSDT",
+            "HYPEUSDT", "WLDUSDT", "SUIUSDT", "DOTUSDT", "DEXEUSDT",
+            "AKEUSDT", "BNBUSDT", "LTCUSDT", "LINKUSDT", "APTUSDT"
         ],
         "max_toplam_islem": 20,
         "max_coin_basi_islem": 3,
