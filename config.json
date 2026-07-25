@@ -1,0 +1,42 @@
+{
+    "_aciklama": "Trade Bot Parametre Dosyasi - Stokastik+MACD flag stratejisi",
+
+    "global": {
+        "kaldirac": 20,
+        "marjin_orani": 0.05,
+        "guvenlik_sl_orani": 0.05,
+        "rr_orani": 2.5,
+        "max_atr_carpani": 4,
+        "flag_gecerlilik_mum": 5,
+        "timeframe": "15",
+        "baslangic_mum_sayisi": 200,
+        "coin_listesi": [
+            "BTCUSDT", "ETHUSDT", "XRPUSDT", "TRXUSDT", "ADAUSDT",
+            "AVAXUSDT", "DOGEUSDT", "SOLUSDT", "ATOMUSDT", "NEARUSDT"
+        ],
+        "max_toplam_islem": 20,
+        "max_coin_basi_islem": 3,
+        "islem_acma_deneme": 3,
+        "islem_acma_bekleme_sn": 2,
+        "islem_kapatma_bekleme_sn": 2
+    },
+
+    "indicators": {
+        "stokastik_k_uzunluk": 50,
+        "stokastik_k_smooth": 21,
+        "stokastik_d_smooth": 8,
+        "macd_hizli": 21,
+        "macd_yavas": 50,
+        "macd_sinyal": 9,
+        "bollinger_uzunluk": 20,
+        "bollinger_stddev": 2,
+        "atr_uzunluk": 14
+    },
+
+    "telegram": {
+        "aktif": true,
+        "rapor_1s": true,
+        "rapor_6s": true,
+        "rapor_24s": true
+    }
+}
