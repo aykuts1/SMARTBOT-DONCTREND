@@ -263,10 +263,41 @@ class TelegramBot:
             )
         self._reply(chat_id, "\n".join(lines))
 
+    def cmd_flagler(self, chat_id, args):
+        if not self.bot_manager:
+            self._reply(chat_id, "Bot henuz hazir degil.")
+            return
+        bm = self.bot_manager
+        all_flags = bm.flag_manager.get_open_flags()
+
+        lines = ["🚩 <b>ACIK FLAGLER</b>"]
+        found = False
+        for symbol in sorted(all_flags.keys()):
+            flags = all_flags[symbol]
+            long_flag = flags.get("long")
+            short_flag = flags.get("short")
+            if not long_flag and not short_flag:
+                continue
+            found = True
+            if long_flag:
+                lines.append(
+                    f"📈 {symbol} LONG - kaynak={long_flag['source']} kalan={long_flag['remaining']} mum"
+                )
+            if short_flag:
+                lines.append(
+                    f"📉 {symbol} SHORT - kaynak={short_flag['source']} kalan={short_flag['remaining']} mum"
+                )
+
+        if not found:
+            lines.append("Su anda acik flag yok.")
+
+        self._reply(chat_id, "\n".join(lines))
+
     def cmd_yardim(self, chat_id, args):
         text = (
             "<b>Komutlar</b>\n"
             "/durum - Anlik durum raporu (acik pozisyonlar, bakiye, marjin)\n"
+            "/flagler - Acik flagleri listeler (onay bekleyen sinyaller)\n"
             "/yardim - Bu mesaj"
         )
         self._reply(chat_id, text)
@@ -287,7 +318,7 @@ class TelegramBot:
         log.info("Telegram polling baslatildi")
 
     def _run_polling(self):
-        commands = {"durum": self.cmd_durum, "yardim": self.cmd_yardim}
+        commands = {"durum": self.cmd_durum, "flagler": self.cmd_flagler, "yardim": self.cmd_yardim}
         offset = None
         log.info("Telegram getUpdates dongusu basladi")
         while True:
