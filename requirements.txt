@@ -1,5 +1,0 @@
-pybit==5.16.0
-python-telegram-bot==22.8
-apscheduler==3.11.2
-numpy>=1.24.0
-pandas>=2.0.0
