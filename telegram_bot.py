@@ -11,6 +11,7 @@ SKIP_REASONS = {
     "slot_dolu": "Slot dolu",
     "bakiye_yetersiz": "Bakiye yetersiz",
     "emir_hatasi": "Emir hatasi",
+    "min_buyukluk": "Minimum islem buyuklugu yetersiz",
 }
 
 

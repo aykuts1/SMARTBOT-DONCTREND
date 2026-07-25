@@ -107,6 +107,8 @@ class TradeManager:
         if rounded_qty < min_qty:
             log.warning("%s %s: Minimum buyukluk altinda (%.6f < %.6f)",
                         symbol, side, rounded_qty, min_qty)
+            if self.telegram:
+                self.telegram.send_signal_skip(symbol, side, "min_buyukluk")
             return None
 
         if margin > balance_info["available"]:
