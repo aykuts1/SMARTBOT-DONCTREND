@@ -6,7 +6,7 @@
         "marjin_orani": 0.05,
         "guvenlik_sl_orani": 0.05,
         "rr_orani": 2.5,
-        "max_atr_carpani": 4,
+        "max_atr_carpani": 3,
         "flag_gecerlilik_mum": 5,
         "timeframe": "15",
         "baslangic_mum_sayisi": 200,

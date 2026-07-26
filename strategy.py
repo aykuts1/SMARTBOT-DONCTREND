@@ -24,7 +24,7 @@ def on_candle_close(symbol, candle, data_pool, flag_manager, config):
 
     cfg = config.get("global", {})
     rr_ratio = cfg.get("rr_orani", 2.5)
-    max_atr_mult = cfg.get("max_atr_carpani", 4)
+    max_atr_mult = cfg.get("max_atr_carpani", 3)
 
     entry_price = candle["close"]
     atr = signals["atr"][-1]
