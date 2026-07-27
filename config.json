@@ -6,7 +6,7 @@
         "marjin_orani": 0.05,
         "guvenlik_sl_orani": 0.05,
         "rr_orani": 2.5,
-        "max_atr_carpani": 3,
+        "max_atr_carpani": 2,
         "flag_gecerlilik_mum": 5,
         "timeframe": "15",
         "baslangic_mum_sayisi": 200,
@@ -17,7 +17,7 @@
             "AKEUSDT", "BNBUSDT", "LTCUSDT", "LINKUSDT", "APTUSDT"
         ],
         "max_toplam_islem": 20,
-        "max_coin_basi_islem": 3,
+        "max_coin_yon_basi_islem": 2,
         "islem_acma_deneme": 3,
         "islem_acma_bekleme_sn": 2,
         "islem_kapatma_bekleme_sn": 2

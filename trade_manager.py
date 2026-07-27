@@ -65,11 +65,11 @@ class TradeManager:
 
         cfg = self.config.get("global", {})
         max_total = cfg.get("max_toplam_islem", 20)
-        max_per_coin = cfg.get("max_coin_basi_islem", 3)
+        max_per_coin_side = cfg.get("max_coin_yon_basi_islem", 2)
 
         with self._lock:
             total = len(self.trades)
-            coin_count = sum(1 for t in self.trades if t["symbol"] == symbol)
+            coin_side_count = sum(1 for t in self.trades if t["symbol"] == symbol and t["side"] == side)
 
         if total >= max_total:
             log.warning("Toplam slot dolu (%d/%d), %s %s atlaniyor", total, max_total, symbol, side)
@@ -77,8 +77,8 @@ class TradeManager:
                 self.telegram.send_signal_skip(symbol, side, "slot_dolu")
             return None
 
-        if coin_count >= max_per_coin:
-            log.warning("%s slot dolu (%d/%d), %s atlaniyor", symbol, coin_count, max_per_coin, side)
+        if coin_side_count >= max_per_coin_side:
+            log.warning("%s %s slot dolu (%d/%d), atlaniyor", symbol, side, coin_side_count, max_per_coin_side)
             if self.telegram:
                 self.telegram.send_signal_skip(symbol, side, "slot_dolu")
             return None
