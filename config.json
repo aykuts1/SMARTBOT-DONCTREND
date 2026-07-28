@@ -11,10 +11,10 @@
         "timeframe": "15",
         "baslangic_mum_sayisi": 200,
         "coin_listesi": [
-            "BTCUSDT", "ETHUSDT", "XRPUSDT", "TRXUSDT", "ADAUSDT",
+            "XRPUSDT", "TRXUSDT", "ADAUSDT",
             "AVAXUSDT", "DOGEUSDT", "SOLUSDT", "ATOMUSDT", "NEARUSDT",
             "HYPEUSDT", "WLDUSDT", "SUIUSDT", "DOTUSDT", "DEXEUSDT",
-            "AKEUSDT", "BNBUSDT", "LTCUSDT", "LINKUSDT", "APTUSDT"
+            "UNIUSDT", "AAVEUSDT", "BNBUSDT", "LTCUSDT", "LINKUSDT", "APTUSDT", "TRUMPUSDT"
         ],
         "max_toplam_islem": 20,
         "max_coin_yon_basi_islem": 2,
