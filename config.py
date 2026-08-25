@@ -39,3 +39,7 @@ STOP_LOSS_PCT = 0.08       # %8 stop loss
 
 # --- Bybit API çağrıları arası bekleme (rate limit için) ---
 API_CALL_DELAY_SEC = 0.3
+
+# --- Railway "uykuya alma" özelliğini engellemek için, beklerken kaç saniyede
+#     bir dışarıya küçük bir istek (keepalive) atılacağı ---
+KEEPALIVE_INTERVAL_SEC = 300  # 5 dakika
