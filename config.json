@@ -13,7 +13,7 @@
             "BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "AVAXUSDT", "WLDUSDT", "ONDOUSDT",
             "SUIUSDT", "HYPEUSDT", "INJUSDT", "ATOMUSDT", "XRPUSDT", "AAVEUSDT", "BNBUSDT",
             "DOGEUSDT", "ENAUSDT", "TAOUSDT", "TRXUSDT", "NEARUSDT", "OPUSDT", "TIAUSDT",
-            "LTCUSDT", "ARBUSDT", "APTUSDT", "UNIUSDT", "TRUMPUSDT", "SHIBUSDT", "1000PEPEUSDT"
+            "LTCUSDT", "ARBUSDT", "APTUSDT", "UNIUSDT", "TRUMPUSDT", "SHIB1000USDT", "1000PEPEUSDT"
         ],
         "maks_toplam_islem": 5,
         "islem_deneme": 3,
@@ -32,6 +32,7 @@
 
     "telegram": {
         "aktif": true,
+        "rapor_1s": true,
         "rapor_6s": true,
         "rapor_24s": true
     }

@@ -139,8 +139,8 @@ class BotManager:
                 log.error("Borsa kapanis kontrolu hatasi: %s", e)
 
     def _report_loop(self):
-        """Spec §9.5: her 6 saatte bir VE her 24 saatte bir periyodik rapor."""
-        last_6h = last_24h = time.time()
+        """Spec §9.5: her 1, 6 ve 24 saatte bir periyodik rapor."""
+        last_1h = last_6h = last_24h = time.time()
         cfg_tg = self.config.get("telegram", {})
 
         while not self._stop_event.is_set():
@@ -148,6 +148,9 @@ class BotManager:
             if self._stop_event.is_set():
                 break
             now = time.time()
+            if now - last_1h >= 3600 and cfg_tg.get("rapor_1s", True):
+                self.telegram.send_1h_report()
+                last_1h = now
             if now - last_6h >= 21600 and cfg_tg.get("rapor_6s", True):
                 self.telegram.send_6h_report()
                 last_6h = now

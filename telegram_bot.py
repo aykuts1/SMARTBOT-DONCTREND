@@ -32,6 +32,7 @@ class TelegramBot:
         self.chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         self.bot_manager = bot_manager
         self._lock = threading.Lock()
+        self.stats_1h = self._init_stats()
         self.stats_6h = self._init_stats()
         self.stats_24h = self._init_stats()
 
@@ -78,6 +79,7 @@ class TelegramBot:
     # spec §9.1
     def send_trade_opened(self, trade):
         with self._lock:
+            self.stats_1h["opened"] += 1
             self.stats_6h["opened"] += 1
             self.stats_24h["opened"] += 1
         text = (
@@ -94,6 +96,7 @@ class TelegramBot:
     # spec §9.2
     def send_trade_closed(self, close_info):
         with self._lock:
+            self.stats_1h["closed"] += 1
             self.stats_6h["closed"] += 1
             self.stats_24h["closed"] += 1
         reason_text = CLOSE_REASONS.get(close_info["reason"], close_info["reason"])
@@ -111,6 +114,7 @@ class TelegramBot:
     # spec §9.3
     def send_signal_mismatch_skip(self, symbol, fisher_dir, ema_dir, macd_dir):
         with self._lock:
+            self.stats_1h["skipped"] += 1
             self.stats_6h["skipped"] += 1
             self.stats_24h["skipped"] += 1
         text = (
@@ -125,6 +129,7 @@ class TelegramBot:
     # spec §9.4
     def send_signal_skip(self, symbol, side, reason):
         with self._lock:
+            self.stats_1h["skipped"] += 1
             self.stats_6h["skipped"] += 1
             self.stats_24h["skipped"] += 1
         text = (
@@ -171,6 +176,11 @@ class TelegramBot:
         ]
         lines.extend(self._open_positions_lines())
         self.send("\n".join(lines))
+
+    def send_1h_report(self):
+        self._send_periodic_report("1 SAATLIK RAPOR", self.stats_1h)
+        with self._lock:
+            self.stats_1h = self._init_stats()
 
     def send_6h_report(self):
         self._send_periodic_report("6 SAATLIK RAPOR", self.stats_6h)
