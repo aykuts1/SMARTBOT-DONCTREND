@@ -11,11 +11,28 @@ from state import BotState
 
 # ---------- Zamanlama ----------
 
-def wait_for_next_hour_close():
-    """1 saatlik mum kapanışından ~10 saniye sonrasına kadar bekler."""
+def wait_for_next_hour_close(client: BybitClient):
+    """
+    1 saatlik mum kapanışından ~10 saniye sonrasına kadar bekler.
+    Bekleme tek seferde değil, KEEPALIVE_INTERVAL_SEC'lik parçalar halinde yapılır;
+    her parçadan sonra Bybit'e küçük bir istek (get_server_time) atılır. Bu istek
+    Railway'in "Serverless / App Sleeping" özelliğinin servisi uykuya almasını engeller
+    (Railway, 10 dakika boyunca dışarıya hiç istek gitmezse servisi uykuya alıyor).
+    """
     now_ts = time.time()
     next_ts = (int(now_ts // 3600) + 1) * 3600 + 10
-    time.sleep(max(next_ts - now_ts, 1))
+
+    while True:
+        now_ts = time.time()
+        remaining = next_ts - now_ts
+        if remaining <= 0:
+            return
+        chunk = min(remaining, config.KEEPALIVE_INTERVAL_SEC)
+        time.sleep(chunk)
+        try:
+            client.session.get_server_time()
+        except Exception as e:
+            print(f"[BİLGİ] Keepalive isteği başarısız: {e}")
 
 
 # ---------- Pozisyon senkronizasyonu ----------
@@ -117,16 +134,21 @@ def execute_exit(client: BybitClient, state: BotState, symbol: str):
 
 # ---------- Sembol işleme ----------
 
-def process_symbol(client: BybitClient, state: BotState, symbol: str):
+def process_symbol(client: BybitClient, state: BotState, symbol: str) -> dict:
+    """
+    Bir coin için tüm işleme adımlarını yürütür.
+    Dönüş, tur özeti bildirimi için kategori bilgisi taşır:
+        {"symbol": ..., "category": "entered" | "no_signal" | "skipped" | "exited" | "error", "side": ... (opsiyonel)}
+    """
     try:
         df_1h = client.get_klines(symbol, config.ENTRY_TIMEFRAME, config.KLINE_LIMIT)
         df_4h = client.get_klines(symbol, config.CONFIRM_TIMEFRAME, config.KLINE_LIMIT)
     except Exception as e:
         print(f"[HATA] {symbol} veri çekilemedi: {e}")
-        return
+        return {"symbol": symbol, "category": "error"}
 
     if len(df_1h) < config.EMA_SLOW + 2 or len(df_4h) < config.MACD_SLOW + 2:
-        return  # yeterli geçmiş veri yok
+        return {"symbol": symbol, "category": "error"}  # yeterli geçmiş veri yok
 
     signals = strategy.analyze_symbol(df_1h, df_4h)
 
@@ -141,17 +163,43 @@ def process_symbol(client: BybitClient, state: BotState, symbol: str):
         action2, payload2 = strategy.decide(signals, False, None)
         if action2 == "enter":
             execute_entry(client, state, symbol, payload2, signals["close_price"])
+            return {"symbol": symbol, "category": "entered", "side": payload2}
         elif action2 == "skip":
             notifier.send_message(f"⏭️ <b>{symbol}</b>\nÇıkış sonrası yeni giriş atlandı.\nSebep: {payload2}")
-        return
+            return {"symbol": symbol, "category": "skipped"}
+        return {"symbol": symbol, "category": "exited"}
 
     if action == "enter":
         execute_entry(client, state, symbol, payload, signals["close_price"])
-        return
+        return {"symbol": symbol, "category": "entered", "side": payload}
 
     if action == "skip":
         notifier.send_message(f"⏭️ <b>{symbol}</b>\nSinyal atlandı.\nSebep: {payload}")
-        return
+        return {"symbol": symbol, "category": "skipped"}
+
+    return {"symbol": symbol, "category": "no_signal"}
+
+
+# ---------- Tur özeti ----------
+
+def send_cycle_summary(state: BotState, results: list):
+    """
+    Bu turda taranan, işlem açılan ve sinyal gelmeyen coinlerin özetini gönderir.
+    (Sinyal gelip de onaylanmayan/atlanan ve çıkış yapılan coinler zaten anlık
+    olarak ayrı bildirimlerle bildirilmiş oluyor.)
+    """
+    scanned = [r["symbol"] for r in results if r["category"] != "error"]
+    entered = [f"{r['symbol']} ({r['side'].upper()})" for r in results if r["category"] == "entered"]
+    no_signal = [r["symbol"] for r in results if r["category"] == "no_signal"]
+
+    lines = [f"🔍 <b>Tur Özeti</b> (tur #{state.cycle_count})", ""]
+    lines.append(f"Taranan ({len(scanned)}): {', '.join(scanned) if scanned else 'Yok'}")
+    lines.append("")
+    lines.append(f"İşlem açılan ({len(entered)}): {', '.join(entered) if entered else 'Yok'}")
+    lines.append("")
+    lines.append(f"Sinyal olmayan ({len(no_signal)}): {', '.join(no_signal) if no_signal else 'Yok'}")
+
+    notifier.send_message("\n".join(lines))
 
 
 # ---------- Durum raporu ----------
@@ -189,7 +237,7 @@ def main():
     notifier.send_message("🤖 Bot başlatıldı. 1 saatlik mum kapanışlarında tarama yapılacak.")
 
     while True:
-        wait_for_next_hour_close()
+        wait_for_next_hour_close(client)
         state.cycle_count += 1
 
         try:
@@ -197,12 +245,17 @@ def main():
         except Exception as e:
             print(f"[HATA] reconcile_positions: {e}")
 
+        cycle_results = []
         for symbol in config.SYMBOLS:
             try:
-                process_symbol(client, state, symbol)
+                result = process_symbol(client, state, symbol)
             except Exception as e:
                 print(f"[HATA] {symbol} işlenirken beklenmeyen hata: {e}")
+                result = {"symbol": symbol, "category": "error"}
+            cycle_results.append(result)
             time.sleep(config.API_CALL_DELAY_SEC)
+
+        send_cycle_summary(state, cycle_results)
 
         if state.cycle_count % 24 == 0:
             send_status_report(client, state, "24 Saatlik")
