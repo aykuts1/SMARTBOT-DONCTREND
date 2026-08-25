@@ -12,6 +12,11 @@ long/short işlem açan ve Telegram üzerinden bildirim gönderen bir sistemdir.
 - Çıkış **sadece** Fisher sinyaline bağlıdır. Ayrıca her pozisyona **%8 Stop Loss** konur.
 - Bir coinde en fazla 1, toplamda en fazla 6 işlem aynı anda açık olabilir.
 - Her işlemde bakiyenin %10'u marj olarak kullanılır, 25x kaldıraç ve Cross Margin ile.
+- Bot her tur sonunda (giriş/çıkış işlemleri bitince) o turda taranan, işlem açılan ve
+  sinyal gelmeyen coinlerin özetini Telegram'a "Tur Özeti" olarak gönderir.
+- Bot beklerken (bir sonraki mum kapanışını beklerken) her 5 dakikada bir Bybit'e küçük
+  bir istek atar (keepalive). Bu, Railway'in "Serverless / App Sleeping" özelliğinin
+  botu uykuya almasını engellemek içindir.
 
 ## Dosya yapısı
 
@@ -51,6 +56,13 @@ Telegram'da **@BotFather**'a `/newbot` yazarak bir bot oluştur, sana vereceği 
 `TELEGRAM_BOT_TOKEN` olarak kullan. Kendi chat id'ni öğrenmek için oluşturduğun bota
 bir mesaj at, sonra `https://api.telegram.org/bot<TOKEN>/getUpdates` adresini tarayıcıda
 aç; dönen JSON içindeki `"chat":{"id": ...}` değeri senin `TELEGRAM_CHAT_ID`'n.
+
+## Railway "Serverless" ayarını da kontrol et
+
+Bot beklerken her 5 dakikada bir keepalive isteği atsa da, ekstra güvence için Railway
+proje ayarlarında **Settings → Deploy → Serverless** kısmına gidip bu özelliğin
+**kapalı** olduğundan emin ol. Normalde varsayılan olarak kapalıdır ama proje ayarlarına
+göre açık gelebiliyor; açık kalırsa bot yine de uykuya dalabilir.
 
 ## Bybit hesap ayarı — ÖNEMLİ
 
