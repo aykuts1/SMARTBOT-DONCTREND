@@ -3,15 +3,13 @@ import threading
 import signal
 
 from logger_setup import setup_logger, get_logger
-from utils import load_config, is_our_order
+from utils import load_config
 from bybit_client import BybitClient
 from data_pool import DataPool
 from price_poller import PricePoller
 from trade_manager import TradeManager
 from telegram_bot import TelegramBot
-from flag_manager import FlagManager
 import strategy
-import state_store
 
 setup_logger()
 log = get_logger("main")
@@ -21,20 +19,15 @@ class BotManager:
     def __init__(self):
         self.config = load_config()
         self.running = False
-        self.start_time = 0
         self._stop_reason = "Manuel durdurma"
 
         self.bybit = BybitClient()
-        self.data_pool = DataPool()
-        self.flag_manager = FlagManager(self.config["global"].get("flag_gecerlilik_mum", 5))
+        self.pool_1h = DataPool()
+        self.pool_4h = DataPool()
         self.telegram = TelegramBot(bot_manager=self)
-        self.trade_manager = TradeManager(
-            self.bybit, self.config, self.telegram, on_state_change=self._persist_state
-        )
+        self.trade_manager = TradeManager(self.bybit, self.config, self.telegram)
 
         self._stop_event = threading.Event()
-        self._scan_thread = None
-        self._report_thread = None
         self.poller = None
 
     # === BASLATMA ===
@@ -50,9 +43,7 @@ class BotManager:
 
         coins = self.config["global"]["coin_listesi"]
         self.bybit.load_instrument_info(coins)
-
-        leverage = self.config["global"]["kaldirac"]
-        self.bybit.setup_account(coins, leverage)
+        self.bybit.setup_account(coins, self.config["global"]["kaldirac"])
 
         balance_info = self.bybit.get_balance()
         if not balance_info:
@@ -60,22 +51,20 @@ class BotManager:
             return
         log.info("Bakiye: %.2f USDT", balance_info["total"])
 
-        self._load_state()
+        # Spec §8: bot her restart'ta tamamen sifirdan baslar, acik islemler
+        # ve borsadaki pozisyonlarla senkronize olmaz.
+        self._log_ignored_positions()
         self._load_initial_data(coins)
-        self._check_existing_positions()
 
-        interval = self.config["global"]["timeframe"]
-        self.poller = PricePoller(self.bybit, self.data_pool, self._on_candle_close)
-        self.poller.start(coins, interval)
+        self.poller = PricePoller(self.bybit)
+        self.poller.add_timeframe(self.config["global"]["timeframe_4h"], self._on_4h_candle_close, prefetch_delay_sn=3)
+        self.poller.add_timeframe(self.config["global"]["timeframe_1h"], self._on_1h_candle_close, prefetch_delay_sn=6)
+        self.poller.start(coins)
 
         self.running = True
-        self.start_time = time.time()
-
         self.telegram.start_polling()
-
-        open_count = self.trade_manager.get_total_count()
-        margin_pct = self.config["global"]["marjin_orani"]
-        self.telegram.send_bot_started(balance_info["total"], margin_pct, leverage, len(coins), open_count)
+        self.telegram.send_bot_started(balance_info["total"], self.config["global"]["marjin_orani"],
+                                        self.config["global"]["kaldirac"], len(coins))
 
         self._start_background_threads()
 
@@ -88,117 +77,82 @@ class BotManager:
         finally:
             self._shutdown(self._stop_reason)
 
-    def _load_state(self):
-        data = state_store.load()
-        if not data:
-            return
-        self.trade_manager.from_dict(data.get("trade_manager", {}))
-        self.flag_manager.from_dict(data.get("flags", {}))
-        self.telegram.from_dict(data.get("telegram_stats", {}))
-        log.info("Onceki state geri yuklendi (%d sanal islem)", self.trade_manager.get_total_count())
-
-    def _persist_state(self):
-        state_store.save({
-            "trade_manager": self.trade_manager.to_dict(),
-            "flags": self.flag_manager.to_dict(),
-            "telegram_stats": self.telegram.to_dict(),
-        })
+    def _log_ignored_positions(self):
+        positions = self.bybit.get_positions()
+        if positions:
+            log.info("Borsada %d acik pozisyon var, spec §8 geregi bot bunlari yonetmeyecek", len(positions))
+        else:
+            log.info("Acik pozisyon bulunmuyor")
 
     def _load_initial_data(self, coins):
-        limit = self.config["global"]["baslangic_mum_sayisi"]
-        interval = self.config["global"]["timeframe"]
-        log.info("Baslangic verileri yukleniyor (%d coin, %d mum)...", len(coins), limit)
+        cfg = self.config["global"]
+        log.info("Baslangic verileri yukleniyor (%d coin, 1H=%d mum, 4H=%d mum)...",
+                  len(coins), cfg["baslangic_mum_sayisi_1h"], cfg["baslangic_mum_sayisi_4h"])
         for symbol in coins:
-            candles = self.bybit.get_klines(symbol, interval, limit)
-            if candles:
-                self.data_pool.set_initial_candles(symbol, candles)
+            candles_1h = self.bybit.get_klines(symbol, cfg["timeframe_1h"], cfg["baslangic_mum_sayisi_1h"])
+            if candles_1h:
+                self.pool_1h.set_initial_candles(symbol, candles_1h)
             time.sleep(0.1)
 
-    def _check_existing_positions(self):
-        positions = self.bybit.get_positions()
-        if not positions:
-            log.info("Acik pozisyon bulunmuyor")
-            return
-        our_count = sum(1 for p in positions if is_our_order(p.get("order_link_id", "")))
-        untagged = [p for p in positions if not is_our_order(p.get("order_link_id", ""))]
-        log.info("Pozisyon ozeti: %d bizim, %d etiketsiz", our_count, len(untagged))
-        self.trade_manager.reconcile()
+            candles_4h = self.bybit.get_klines(symbol, cfg["timeframe_4h"], cfg["baslangic_mum_sayisi_4h"])
+            if candles_4h:
+                self.pool_4h.set_initial_candles(symbol, candles_4h)
+                strategy.on_4h_candle_close(symbol, self.pool_4h, self.config)
+            time.sleep(0.1)
 
-    # === GERI CAGRILAR ===
+    # === GERI CAGRILAR (mum kapanisi) ===
 
-    def _on_candle_close(self, symbol, candle):
-        self.data_pool.add_candle(symbol, candle)
+    def _on_1h_candle_close(self, symbol, candle):
+        self.pool_1h.add_candle(symbol, candle)
         if not self.running:
             return
         try:
-            requests = strategy.on_candle_close(symbol, candle, self.data_pool, self.flag_manager, self.config)
-            self._persist_state()
-            for req in requests:
-                self.trade_manager.open_trade(req)
+            strategy.on_1h_candle_close(symbol, candle, self.pool_1h, self.pool_4h, self.trade_manager, self.telegram, self.config)
         except Exception as e:
-            log.error("%s mum kapanis isleme hatasi: %s", symbol, e)
+            log.error("%s 1H mum kapanis isleme hatasi: %s", symbol, e)
+
+    def _on_4h_candle_close(self, symbol, candle):
+        self.pool_4h.add_candle(symbol, candle)
+        if not self.running:
+            return
+        try:
+            strategy.on_4h_candle_close(symbol, self.pool_4h, self.config)
+        except Exception as e:
+            log.error("%s 4H mum kapanis isleme hatasi: %s", symbol, e)
 
     # === ARKA PLAN DONGULERI ===
 
     def _start_background_threads(self):
-        self._scan_thread = threading.Thread(target=self._scan_loop, daemon=True, name="scan_loop")
-        self._scan_thread.start()
-        self._report_thread = threading.Thread(target=self._report_loop, daemon=True, name="report_loop")
-        self._report_thread.start()
+        threading.Thread(target=self._exchange_poll_loop, daemon=True, name="exchange_poll_loop").start()
+        threading.Thread(target=self._report_loop, daemon=True, name="report_loop").start()
 
-    def _scan_loop(self):
-        coins = self.config["global"]["coin_listesi"]
-        reconcile_counter = 0
+    def _exchange_poll_loop(self):
+        """Spec §7: borsadaki sabit %4 SL kendiliginden tetiklendiginde
+        bunu algilamak icin her 5sn takip edilen pozisyonlar kontrol edilir."""
         while not self._stop_event.is_set():
             self._stop_event.wait(5)
             if self._stop_event.is_set() or not self.running:
                 continue
-
-            for symbol in coins:
-                price = self.data_pool.get_price(symbol)
-                if price and price > 0:
-                    try:
-                        self.trade_manager.check_exit(symbol, price)
-                    except Exception as e:
-                        log.error("%s check_exit hatasi: %s", symbol, e)
-
-            reconcile_counter += 1
-            if reconcile_counter >= 60:
-                reconcile_counter = 0
-                try:
-                    self.trade_manager.reconcile()
-                except Exception as e:
-                    log.error("Reconcile hatasi: %s", e)
+            try:
+                self.trade_manager.poll_exchange_closures()
+            except Exception as e:
+                log.error("Borsa kapanis kontrolu hatasi: %s", e)
 
     def _report_loop(self):
-        last_1h = time.time()
-        last_6h = time.time()
-        last_24h = time.time()
+        """Spec §9.5: her 6 saatte bir VE her 24 saatte bir periyodik rapor."""
+        last_6h = last_24h = time.time()
         cfg_tg = self.config.get("telegram", {})
 
         while not self._stop_event.is_set():
             self._stop_event.wait(60)
             if self._stop_event.is_set():
                 break
-
             now = time.time()
-            balance_info = self.bybit.get_balance()
-            balance = balance_info["total"] if balance_info else 0
-            open_count = self.trade_manager.get_total_count()
-
-            if now - last_1h >= 3600 and cfg_tg.get("rapor_1s", True):
-                self.telegram.send_hourly_report(balance, open_count)
-                self._persist_state()
-                last_1h = now
-
             if now - last_6h >= 21600 and cfg_tg.get("rapor_6s", True):
-                self.telegram.send_6h_report(balance)
-                self._persist_state()
+                self.telegram.send_6h_report()
                 last_6h = now
-
             if now - last_24h >= 86400 and cfg_tg.get("rapor_24s", True):
-                self.telegram.send_24h_report(balance)
-                self._persist_state()
+                self.telegram.send_24h_report()
                 last_24h = now
 
     # === KAPATMA ===
@@ -208,9 +162,7 @@ class BotManager:
         self._stop_event.set()
         if self.poller:
             self.poller.stop()
-        open_count = self.trade_manager.get_total_count()
-        self.telegram.send_bot_stopped(reason, open_count)
-        self._persist_state()
+        self.telegram.send_bot_stopped(reason, self.trade_manager.get_total_count())
         log.info("Bot durduruldu: %s", reason)
 
 

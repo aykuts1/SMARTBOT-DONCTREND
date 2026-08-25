@@ -14,57 +14,29 @@ SKIP_REASONS = {
     "min_buyukluk": "Minimum islem buyuklugu yetersiz",
 }
 
+CLOSE_REASONS = {
+    "fisher_ters_kesim": "Fisher ters kesim",
+    "stop_loss": "Stop-loss tetiklendi",
+}
+
+DIR_LABEL = {"long": "LONG", "short": "SHORT", None: "-"}
+
 
 class TelegramBot:
-    def __init__(self, bot_manager=None):
+    """Spec §9: anlik bildirimler + periyodik raporlar. Sayaclar sadece
+    bellekte tutulur - spec §8 geregi bot restart'ta her seyi sifirlar,
+    bu yuzden hicbir istatistik diske yazilmaz."""
+
+    def __init__(self, bot_manager):
         self.token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         self.bot_manager = bot_manager
         self._lock = threading.Lock()
-
-        self.stats_1h = self._init_stats()
         self.stats_6h = self._init_stats()
         self.stats_24h = self._init_stats()
 
     def _init_stats(self):
-        return {
-            "opened": 0, "closed": 0, "skipped": 0,
-            "wins": 0, "losses": 0, "pnl": 0.0,
-            "coin_stats": {},
-        }
-
-    def _coin_stats(self, stats, symbol):
-        if symbol not in stats["coin_stats"]:
-            stats["coin_stats"][symbol] = {"opened": 0, "closed": 0, "wins": 0, "losses": 0, "pnl": 0.0}
-        return stats["coin_stats"][symbol]
-
-    # === KAYIT (istatistik sayaclari) ===
-
-    def record_open(self, symbol):
-        with self._lock:
-            for stats in (self.stats_1h, self.stats_6h, self.stats_24h):
-                stats["opened"] += 1
-                self._coin_stats(stats, symbol)["opened"] += 1
-
-    def record_close(self, symbol, pnl):
-        with self._lock:
-            for stats in (self.stats_1h, self.stats_6h, self.stats_24h):
-                stats["closed"] += 1
-                stats["pnl"] += pnl
-                coin = self._coin_stats(stats, symbol)
-                coin["closed"] += 1
-                coin["pnl"] += pnl
-                if pnl >= 0:
-                    stats["wins"] += 1
-                    coin["wins"] += 1
-                else:
-                    stats["losses"] += 1
-                    coin["losses"] += 1
-
-    def record_skip(self):
-        with self._lock:
-            for stats in (self.stats_1h, self.stats_6h, self.stats_24h):
-                stats["skipped"] += 1
+        return {"opened": 0, "closed": 0, "skipped": 0}
 
     # === GONDERIM ===
 
@@ -74,21 +46,20 @@ class TelegramBot:
             return
         try:
             url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-            payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
-            resp = req_lib.post(url, json=payload, timeout=10)
+            resp = req_lib.post(url, json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
             if not resp.ok:
                 log.error("Telegram gonderim hatasi: %s", resp.text)
         except Exception as e:
             log.error("Telegram gonderim hatasi: %s", e)
 
-    def send_bot_started(self, balance, margin_pct, leverage, coin_count, open_count):
+    def send_bot_started(self, balance, margin_pct, leverage, coin_count):
         text = (
             "🟢 <b>BOT BASLADI</b>\n"
             f"Zaman: {now_str()}\n"
             f"Izlenen coin: {coin_count}\n"
             f"Bakiye: {format_usdt(balance)} USDT\n"
             f"Marjin: %{margin_pct * 100:.0f} | Kaldirac: {leverage}x\n"
-            f"Acik pozisyon: {open_count}"
+            f"Acik pozisyon: 0 (restart'ta sifirlanir)"
         )
         self.send(text)
 
@@ -97,129 +68,119 @@ class TelegramBot:
             "🔴 <b>BOT DURDU</b>\n"
             f"Zaman: {now_str()}\n"
             f"Sebep: {reason}\n"
-            f"Acik pozisyon: {open_count}"
+            f"Bot tarafindan izlenen acik pozisyon: {open_count}"
         )
         self.send(text)
 
-    def send_signal_skip(self, symbol, side, reason):
-        self.record_skip()
-        reason_text = SKIP_REASONS.get(reason, reason)
-        text = (
-            "⚠️ <b>SINYAL ATLANDI</b>\n"
-            f"Coin: {symbol}\n"
-            f"Yon: {side_display(side)}\n"
-            f"Sebep: {reason_text}\n"
-            f"Zaman: {now_str()}"
-        )
-        self.send(text)
+    def send_critical_alert(self, text):
+        self.send(f"🆘 <b>KRITIK UYARI</b>\n{text}")
 
+    # spec §9.1
     def send_trade_opened(self, trade):
-        self.record_open(trade["symbol"])
+        with self._lock:
+            self.stats_6h["opened"] += 1
+            self.stats_24h["opened"] += 1
         text = (
             f"{side_emoji(trade['side'])} <b>ISLEM GIRISI</b>\n"
             f"Coin: {trade['symbol']}\n"
             f"Yon: {side_display(trade['side'])}\n"
             f"Giris: {trade['entry_price']:.6f}\n"
-            f"Lose Exit: {trade['lose_exit']:.6f}\n"
-            f"Win Exit: {trade['win_exit']:.6f}\n"
-            f"Marjin: {format_usdt(trade['margin'])} USDT | Kaldirac: {trade['leverage']}x\n"
+            f"Pozisyon Buyuklugu: {format_usdt(trade['margin'])} USDT (marj) | Kaldirac: {trade['leverage']}x\n"
+            f"Stop-Loss: {trade['sl_price']:.6f}\n"
             f"Zaman: {now_str()}"
         )
         self.send(text)
 
+    # spec §9.2
     def send_trade_closed(self, close_info):
-        self.record_close(close_info["symbol"], close_info["pnl"])
+        with self._lock:
+            self.stats_6h["closed"] += 1
+            self.stats_24h["closed"] += 1
+        reason_text = CLOSE_REASONS.get(close_info["reason"], close_info["reason"])
         text = (
             f"{side_emoji(close_info['side'])} <b>ISLEM KAPANISI</b>\n"
             f"Coin: {close_info['symbol']}\n"
             f"Yon: {side_display(close_info['side'])}\n"
             f"Giris: {close_info['entry_price']:.6f} -> Cikis: {close_info['exit_price']:.6f}\n"
-            f"Sebep: {close_info['reason']}\n"
+            f"Sebep: {reason_text}\n"
             f"Kar/Zarar: {format_pnl(close_info['pnl'], close_info['pnl_pct'])}\n"
             f"Sure: {format_duration(close_info['duration'])}"
         )
         self.send(text)
 
-    def send_reconcile_warning(self, symbol, side, internal_qty, exchange_qty):
+    # spec §9.3
+    def send_signal_mismatch_skip(self, symbol, fisher_dir, ema_dir, macd_dir):
+        with self._lock:
+            self.stats_6h["skipped"] += 1
+            self.stats_24h["skipped"] += 1
         text = (
-            "⚠️ <b>POZISYON UYUSMAZLIGI</b>\n"
-            f"Coin: {symbol} | Yon: {side_display(side)}\n"
-            f"Bot takibi: {internal_qty:.6f}\n"
-            f"Borsadaki: {exchange_qty:.6f}"
+            f"⚠️ <b>{symbol}</b>\n"
+            f"Fisher: {DIR_LABEL[fisher_dir]}\n"
+            f"EMA: {DIR_LABEL.get(ema_dir, '-')}\n"
+            f"MACD: {DIR_LABEL.get(macd_dir, '-')}\n"
+            f"Sinyal atlandi"
         )
         self.send(text)
 
-    # === PERIYODIK RAPORLAR ===
-
-    def send_hourly_report(self, balance, open_count):
+    # spec §9.4
+    def send_signal_skip(self, symbol, side, reason):
         with self._lock:
-            stats = self.stats_1h
-            text = (
-                "📊 <b>1 SAATLIK RAPOR</b>\n"
-                f"Acilan islem: {stats['opened']}\n"
-                f"Kapanan islem: {stats['closed']}\n"
-                f"Atlanan sinyal: {stats['skipped']}\n"
-                f"Acik pozisyon: {open_count}\n"
-                f"Bakiye: {format_usdt(balance)} USDT"
-            )
-            self.stats_1h = self._init_stats()
+            self.stats_6h["skipped"] += 1
+            self.stats_24h["skipped"] += 1
+        text = (
+            "⚠️ <b>SINYAL ATLANDI</b>\n"
+            f"Coin: {symbol}\n"
+            f"Yon: {side_display(side)}\n"
+            f"Sebep: {SKIP_REASONS.get(reason, reason)}\n"
+            f"Zaman: {now_str()}"
+        )
         self.send(text)
 
-    def send_6h_report(self, balance):
+    # === PERIYODIK RAPOR (spec §9.5) ===
+
+    def _open_positions_lines(self):
+        bm = self.bot_manager
+        trades = bm.trade_manager.get_open_trades()
+        if not trades:
+            return ["Acik pozisyon yok."]
+        positions = {(p["symbol"], p["side"]): p for p in bm.bybit.get_positions()}
+        lines = []
+        for t in trades:
+            pos = positions.get((t["symbol"], t["side"]))
+            pnl = pos["unrealised_pnl"] if pos else 0.0
+            lines.append(f"  {side_emoji(t['side'])} {t['symbol']} {side_display(t['side'])} pnl={format_usdt(pnl)} USDT")
+        return lines
+
+    def _send_periodic_report(self, title, stats):
+        bm = self.bot_manager
+        balance_info = bm.bybit.get_balance()
+        balance = balance_info["total"] if balance_info else 0
+        open_trades = bm.trade_manager.get_open_trades()
+        slot_max = bm.config["global"]["maks_toplam_islem"]
+
         with self._lock:
-            stats = self.stats_6h
-            total_closed = stats["wins"] + stats["losses"]
-            win_rate = (stats["wins"] / total_closed * 100) if total_closed else 0.0
-            lines = [
-                "📊 <b>6 SAATLIK RAPOR</b>",
-                f"Acilan: {stats['opened']} | Kapanan: {stats['closed']} | Atlanan: {stats['skipped']}",
-                f"Donemsel Win Rate: %{win_rate:.1f}",
-                f"Toplam Kar/Zarar: {format_usdt(stats['pnl'])} USDT",
-                f"Bakiye: {format_usdt(balance)} USDT",
-                "",
-                "Coin Bazli Dagilim:",
-            ]
-            for symbol, cs in sorted(stats["coin_stats"].items()):
-                if cs["opened"] or cs["closed"]:
-                    lines.append(f"  {symbol}: acilan={cs['opened']} kapanan={cs['closed']} pnl={format_usdt(cs['pnl'])}")
-            text = "\n".join(lines)
+            opened, closed, skipped = stats["opened"], stats["closed"], stats["skipped"]
+
+        lines = [
+            f"📊 <b>{title}</b>",
+            f"Bakiye/Equity: {format_usdt(balance)} USDT",
+            f"Donem ici acilan: {opened} | kapanan: {closed} | atlanan sinyal: {skipped}",
+            f"Doluluk: {len(open_trades)}/{slot_max}",
+            "",
+            "Acik Pozisyonlar:",
+        ]
+        lines.extend(self._open_positions_lines())
+        self.send("\n".join(lines))
+
+    def send_6h_report(self):
+        self._send_periodic_report("6 SAATLIK RAPOR", self.stats_6h)
+        with self._lock:
             self.stats_6h = self._init_stats()
-        self.send(text)
 
-    def send_24h_report(self, balance):
+    def send_24h_report(self):
+        self._send_periodic_report("24 SAATLIK RAPOR", self.stats_24h)
         with self._lock:
-            stats = self.stats_24h
-            total_closed = stats["wins"] + stats["losses"]
-            win_rate = (stats["wins"] / total_closed * 100) if total_closed else 0.0
-            best_coin = None
-            best_count = 0
-            for symbol, cs in stats["coin_stats"].items():
-                if cs["opened"] > best_count:
-                    best_count = cs["opened"]
-                    best_coin = symbol
-            text = (
-                "📊 <b>24 SAATLIK RAPOR</b>\n"
-                f"Toplam Kar/Zarar: {format_usdt(stats['pnl'])} USDT\n"
-                f"Win Rate: %{win_rate:.1f}\n"
-                f"En Aktif Coin: {best_coin or '-'}\n"
-                f"Acilan Sinyal: {stats['opened']} | Atlanan Sinyal: {stats['skipped']}\n"
-                f"Bakiye: {format_usdt(balance)} USDT"
-            )
             self.stats_24h = self._init_stats()
-        self.send(text)
-
-    # === STATE PERSISTENCE ===
-
-    def to_dict(self):
-        with self._lock:
-            return {"stats_1h": self.stats_1h, "stats_6h": self.stats_6h, "stats_24h": self.stats_24h}
-
-    def from_dict(self, data):
-        with self._lock:
-            data = data or {}
-            self.stats_1h = data.get("stats_1h") or self._init_stats()
-            self.stats_6h = data.get("stats_6h") or self._init_stats()
-            self.stats_24h = data.get("stats_24h") or self._init_stats()
 
     # === KOMUTLAR (/durum, /yardim) ===
 
@@ -233,71 +194,25 @@ class TelegramBot:
             log.error("Telegram yanit hatasi: %s", e)
 
     def cmd_durum(self, chat_id, args):
-        if not self.bot_manager:
-            self._reply(chat_id, "Bot henuz hazir degil.")
-            return
         bm = self.bot_manager
         balance_info = bm.bybit.get_balance()
         balance = balance_info["total"] if balance_info else 0
         used_margin = balance_info["used"] if balance_info else 0
-        trades = bm.trade_manager.get_open_trades()
 
         lines = [
             "📋 <b>ANLIK DURUM RAPORU</b>",
             f"Bakiye: {format_usdt(balance)} USDT",
             f"Kullanilan Marjin: {format_usdt(used_margin)} USDT",
-            f"Acik Pozisyon: {len(trades)}",
+            f"Acik Pozisyon: {bm.trade_manager.get_total_count()}/{bm.config['global']['maks_toplam_islem']}",
             "",
         ]
-        for t in trades:
-            price = bm.data_pool.get_price(t["symbol"])
-            pnl = 0.0
-            if price:
-                if t["side"] == "long":
-                    pnl = (price - t["entry_price"]) * t["qty"]
-                else:
-                    pnl = (t["entry_price"] - price) * t["qty"]
-            lines.append(
-                f"{side_emoji(t['side'])} {t['symbol']} {side_display(t['side'])} "
-                f"giris={t['entry_price']:.6f} pnl={format_usdt(pnl)}"
-            )
-        self._reply(chat_id, "\n".join(lines))
-
-    def cmd_flagler(self, chat_id, args):
-        if not self.bot_manager:
-            self._reply(chat_id, "Bot henuz hazir degil.")
-            return
-        bm = self.bot_manager
-        all_flags = bm.flag_manager.get_open_flags()
-
-        lines = ["🚩 <b>ACIK FLAGLER</b>"]
-        found = False
-        for symbol in sorted(all_flags.keys()):
-            flags = all_flags[symbol]
-            long_flag = flags.get("long")
-            short_flag = flags.get("short")
-            if not long_flag and not short_flag:
-                continue
-            found = True
-            if long_flag:
-                lines.append(
-                    f"📈 {symbol} LONG - kaynak={long_flag['source']} kalan={long_flag['remaining']} mum"
-                )
-            if short_flag:
-                lines.append(
-                    f"📉 {symbol} SHORT - kaynak={short_flag['source']} kalan={short_flag['remaining']} mum"
-                )
-
-        if not found:
-            lines.append("Su anda acik flag yok.")
-
+        lines.extend(self._open_positions_lines())
         self._reply(chat_id, "\n".join(lines))
 
     def cmd_yardim(self, chat_id, args):
         text = (
             "<b>Komutlar</b>\n"
             "/durum - Anlik durum raporu (acik pozisyonlar, bakiye, marjin)\n"
-            "/flagler - Acik flagleri listeler (onay bekleyen sinyaller)\n"
             "/yardim - Bu mesaj"
         )
         self._reply(chat_id, text)
@@ -307,29 +222,21 @@ class TelegramBot:
             log.warning("Telegram token bulunamadi, komutlar devre disi")
             return
         try:
-            req_lib.post(
-                f"https://api.telegram.org/bot{self.token}/deleteWebhook",
-                json={"drop_pending_updates": True}, timeout=10
-            )
+            req_lib.post(f"https://api.telegram.org/bot{self.token}/deleteWebhook", json={"drop_pending_updates": True}, timeout=10)
         except Exception as e:
             log.warning("Webhook silme hatasi: %s", e)
-        thread = threading.Thread(target=self._run_polling, daemon=True, name="telegram_polling")
-        thread.start()
+        threading.Thread(target=self._run_polling, daemon=True, name="telegram_polling").start()
         log.info("Telegram polling baslatildi")
 
     def _run_polling(self):
-        commands = {"durum": self.cmd_durum, "flagler": self.cmd_flagler, "yardim": self.cmd_yardim}
+        commands = {"durum": self.cmd_durum, "yardim": self.cmd_yardim}
         offset = None
-        log.info("Telegram getUpdates dongusu basladi")
         while True:
             try:
                 params = {"timeout": 30, "allowed_updates": ["message"]}
                 if offset is not None:
                     params["offset"] = offset
-                resp = req_lib.get(
-                    f"https://api.telegram.org/bot{self.token}/getUpdates",
-                    params=params, timeout=40
-                )
+                resp = req_lib.get(f"https://api.telegram.org/bot{self.token}/getUpdates", params=params, timeout=40)
                 if not resp.ok:
                     log.warning("getUpdates hatasi: %s", resp.text)
                     time.sleep(5)
@@ -343,11 +250,9 @@ class TelegramBot:
                         continue
                     parts = text.split()
                     cmd = parts[0].split("@")[0][1:].lower()
-                    args = parts[1:]
-                    log.info("Komut alindi: /%s (chat_id=%s)", cmd, chat_id)
                     handler = commands.get(cmd)
                     if handler:
-                        threading.Thread(target=handler, args=(chat_id, args), daemon=True).start()
+                        threading.Thread(target=handler, args=(chat_id, parts[1:]), daemon=True).start()
             except Exception as e:
                 log.error("Telegram polling hatasi: %s", e)
                 time.sleep(5)

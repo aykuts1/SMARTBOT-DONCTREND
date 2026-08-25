@@ -1,84 +1,53 @@
 import time
 import threading
 from logger_setup import get_logger
-from utils import (
-    calc_position_size, calc_sl_price, calc_pnl, sl_round,
-    qty_round_down, generate_order_link_id
-)
+from utils import calc_position_size, calc_sl_price, calc_pnl, qty_round_down, generate_order_link_id
 import trade_history
 
 log = get_logger("trade_manager")
 
 
 class TradeManager:
-    """Spesifikasyon §8-9-11-12: sanal islem takibi.
+    """Spec §7-8: coin basina en fazla 1, toplamda config.global.maks_toplam_islem
+    islem izlenir. Cikis SADECE Fisher ters kesimiyle (close_trade, strategy.py
+    tarafindan cagrilir) ya da borsadaki sabit %4 stop-loss'un kendiliginden
+    tetiklenmesiyle (poll_exchange_closures) olur. Restart'ta state hic
+    yuklenmez/kaydedilmez - bot her zaman 0/maks_toplam_islem ile baslar."""
 
-    Ayni coin+yonde birden fazla islem borsada TEK pozisyonda toplanir
-    (Bybit hedge modu); bot her sinyali kendi entry/lose/win seviyeleriyle
-    ayri 'sanal islem' olarak izler ve kapanislari reduce-only kismi
-    emirlerle yapar. Pozisyonun tamamini kapsayan %5 emniyet SL'i her yeni
-    girise gore guncellenir.
-    """
-
-    def __init__(self, bybit_client, config, telegram=None, on_state_change=None):
+    def __init__(self, bybit_client, config, telegram=None):
         self.client = bybit_client
         self.config = config
         self.telegram = telegram
-        self._on_state_change = on_state_change
         self._lock = threading.Lock()
-        self.trades = []
-        self._next_id = 1
-
-    def reload_config(self, config):
-        self.config = config
-
-    def _persist(self):
-        if self._on_state_change:
-            self._on_state_change()
+        self.trades = {}  # symbol -> trade dict
+        self._miss_counts = {}  # symbol -> ardisik "borsada bulunamadi" sayaci
 
     def get_total_count(self):
         with self._lock:
             return len(self.trades)
 
-    def get_coin_count(self, symbol):
+    def get_trade(self, symbol):
         with self._lock:
-            return sum(1 for t in self.trades if t["symbol"] == symbol)
+            t = self.trades.get(symbol)
+            return dict(t) if t else None
 
-    def get_open_trades(self, symbol=None):
+    def get_open_trades(self):
         with self._lock:
-            if symbol:
-                return [dict(t) for t in self.trades if t["symbol"] == symbol]
-            return [dict(t) for t in self.trades]
-
-    def get_trades_for_symbol_side(self, symbol, side):
-        with self._lock:
-            return [t for t in self.trades if t["symbol"] == symbol and t["side"] == side]
+            return [dict(t) for t in self.trades.values()]
 
     # === ISLEM ACMA ===
 
     def open_trade(self, request):
-        symbol = request["symbol"]
-        side = request["side"]
-        entry_price = request["entry_price"]
-        lose_exit = request["lose_exit"]
-        win_exit = request["win_exit"]
-
+        symbol, side, entry_price = request["symbol"], request["side"], request["entry_price"]
         cfg = self.config.get("global", {})
-        max_total = cfg.get("max_toplam_islem", 20)
-        max_per_coin_side = cfg.get("max_coin_yon_basi_islem", 2)
+        max_total = cfg.get("maks_toplam_islem", 5)
 
         with self._lock:
+            already_open = symbol in self.trades
             total = len(self.trades)
-            coin_side_count = sum(1 for t in self.trades if t["symbol"] == symbol and t["side"] == side)
 
-        if total >= max_total:
-            log.warning("Toplam slot dolu (%d/%d), %s %s atlaniyor", total, max_total, symbol, side)
-            if self.telegram:
-                self.telegram.send_signal_skip(symbol, side, "slot_dolu")
-            return None
-
-        if coin_side_count >= max_per_coin_side:
-            log.warning("%s %s slot dolu (%d/%d), atlaniyor", symbol, side, coin_side_count, max_per_coin_side)
+        if already_open or total >= max_total:
+            log.warning("%s: slot dolu (coin_acik=%s toplam=%d/%d), atlaniyor", symbol, already_open, total, max_total)
             if self.telegram:
                 self.telegram.send_signal_skip(symbol, side, "slot_dolu")
             return None
@@ -89,8 +58,8 @@ class TradeManager:
             return None
 
         balance = balance_info["total"]
-        margin_pct = cfg.get("marjin_orani", 0.05)
-        leverage = cfg.get("kaldirac", 20)
+        margin_pct = cfg.get("marjin_orani", 0.10)
+        leverage = cfg.get("kaldirac", 25)
 
         if not self.client.instrument_info.get(symbol):
             self.client.load_instrument_info([symbol])
@@ -100,37 +69,31 @@ class TradeManager:
 
         min_qty = self.client.get_min_qty(symbol)
         qty_step = self.client.get_qty_step(symbol)
-
         qty, margin, notional = calc_position_size(balance, margin_pct, leverage, entry_price)
         rounded_qty = qty_round_down(qty, qty_step)
 
         if rounded_qty < min_qty:
-            log.warning("%s %s: Minimum buyukluk altinda (%.6f < %.6f)",
-                        symbol, side, rounded_qty, min_qty)
+            log.warning("%s %s: Minimum buyukluk altinda (%.6f < %.6f)", symbol, side, rounded_qty, min_qty)
             if self.telegram:
                 self.telegram.send_signal_skip(symbol, side, "min_buyukluk")
             return None
 
         if margin > balance_info["available"]:
-            log.warning("%s %s: Yetersiz bakiye (%.2f > %.2f)",
-                        symbol, side, margin, balance_info["available"])
+            log.warning("%s %s: Yetersiz bakiye (%.2f > %.2f)", symbol, side, margin, balance_info["available"])
             if self.telegram:
                 self.telegram.send_signal_skip(symbol, side, "bakiye_yetersiz")
             return None
 
-        max_retries = cfg.get("islem_acma_deneme", 3)
+        max_retries = cfg.get("islem_deneme", 3)
         retry_delay = cfg.get("islem_acma_bekleme_sn", 2)
         order_link_id = generate_order_link_id(side, symbol)
 
         result = None
         for attempt in range(1, max_retries + 1):
-            result = self.client.place_order(
-                symbol=symbol, side=side, qty=rounded_qty, order_link_id=order_link_id
-            )
+            result = self.client.place_order(symbol=symbol, side=side, qty=rounded_qty, order_link_id=order_link_id)
             if result["success"]:
                 break
-            log.warning("%s %s: Emir denemesi %d/%d basarisiz: %s",
-                        symbol, side, attempt, max_retries, result.get("error", ""))
+            log.warning("%s %s: Emir denemesi %d/%d basarisiz: %s", symbol, side, attempt, max_retries, result.get("error", ""))
             if attempt < max_retries:
                 time.sleep(retry_delay)
 
@@ -140,165 +103,148 @@ class TradeManager:
                 self.telegram.send_signal_skip(symbol, side, "emir_hatasi")
             return None
 
-        actual_notional = rounded_qty * entry_price
-        commission = actual_notional * 0.00055
-        actual_margin = actual_notional / leverage
-
-        self._refresh_safety_sl(symbol, side, entry_price)
+        actual_qty = result["qty"]
+        actual_margin = (actual_qty * entry_price) / leverage
+        sl_price = self._set_stop_loss(symbol, side, entry_price)
 
         trade = {
-            "id": None,
             "symbol": symbol,
             "side": side,
             "entry_price": entry_price,
-            "qty": rounded_qty,
-            "lose_exit": lose_exit,
-            "win_exit": win_exit,
+            "qty": actual_qty,
+            "sl_price": sl_price,
             "margin": actual_margin,
             "leverage": leverage,
-            "commission": commission,
             "order_id": result["order_id"],
-            "order_link_id": order_link_id,
             "open_time": time.time(),
         }
 
         with self._lock:
-            trade["id"] = self._next_id
-            self._next_id += 1
-            self.trades.append(trade)
+            self.trades[symbol] = trade
+            self._miss_counts[symbol] = 0
 
-        self._persist()
-
-        log.info("ISLEM ACILDI: %s %s giris=%.6f lose=%.6f win=%.6f qty=%.6f",
-                  symbol, side, entry_price, lose_exit, win_exit, rounded_qty)
-
+        log.info("ISLEM ACILDI: %s %s giris=%.6f sl=%.6f qty=%.6f", symbol, side, entry_price, sl_price, actual_qty)
         if self.telegram:
             self.telegram.send_trade_opened(trade)
-
         return trade
 
-    def _refresh_safety_sl(self, symbol, side, latest_entry_price):
-        """Spec §9: borsaya %5 emniyet SL emri - sadece emniyet kemeri.
-        Pozisyonun tamamini kapsayacak sekilde en son giris fiyatina gore guncellenir."""
-        cfg = self.config.get("global", {})
-        safety_pct = cfg.get("guvenlik_sl_orani", 0.05)
-        sl_price = calc_sl_price(latest_entry_price, safety_pct, side)
-        tick_size = self.client.get_tick_size(symbol)
-        sl_price = sl_round(0, sl_price, tick_size, side)
-        self.client.set_position_sl(symbol, side, sl_price)
+    def _set_stop_loss(self, symbol, side, entry_price):
+        """Spec §7: borsaya sabit %4 stop-loss - mum kapanislari arasindaki
+        TEK koruma. Basarisiz olursa 3 kez denenir, hepsi basarisizsa
+        kritik Telegram uyarisi gonderilir."""
+        sl_pct = self.config.get("global", {}).get("sl_orani", 0.04)
+        sl_price = calc_sl_price(entry_price, sl_pct, side)
 
-    # === ISLEM KAPATMA (5sn tick, spec §6) ===
+        for attempt in range(1, 4):
+            if self.client.set_position_sl(symbol, side, sl_price):
+                return sl_price
+            log.warning("%s %s: SL koyma denemesi %d/3 basarisiz", symbol, side, attempt)
+            if attempt < 3:
+                time.sleep(1)
 
-    def check_exit(self, symbol, price):
-        if not price or price <= 0:
-            return
+        log.error("%s %s: SL 3 denemede de konulamadi, pozisyon korumasiz!", symbol, side)
+        if self.telegram:
+            self.telegram.send_critical_alert(
+                f"{symbol} {side.upper()}: Stop-loss borsaya YERLESTIRILEMEDI. "
+                f"Pozisyon korumasiz, lutfen manuel kontrol edin."
+            )
+        return sl_price
+
+    # === ISLEM KAPATMA: Fisher ters kesim (strategy.py tarafindan cagrilir) ===
+
+    def close_trade(self, symbol, reason, exit_price):
         with self._lock:
-            symbol_trades = [t for t in self.trades if t["symbol"] == symbol]
+            trade = self.trades.get(symbol)
+        if not trade:
+            return None
 
-        for trade in symbol_trades:
-            reason = None
-            if trade["side"] == "long":
-                if price <= trade["lose_exit"]:
-                    reason = "lose_exit"
-                elif price >= trade["win_exit"]:
-                    reason = "win_exit"
-            else:
-                if price >= trade["lose_exit"]:
-                    reason = "lose_exit"
-                elif price <= trade["win_exit"]:
-                    reason = "win_exit"
-
-            if reason:
-                self._close_trade(trade, reason, price)
-
-    def _close_trade(self, trade, reason, exit_price):
         cfg = self.config.get("global", {})
-        max_retries = cfg.get("islem_acma_deneme", 3)
+        max_retries = cfg.get("islem_deneme", 3)
         retry_delay = cfg.get("islem_kapatma_bekleme_sn", 2)
+
+        # Borsadaki guncel pozisyon miktari kapatilir (bot'un izledigi qty degil).
+        exchange_qty = self.client.get_position_size(symbol, trade["side"])
+        close_qty = exchange_qty if exchange_qty > 0 else trade["qty"]
 
         result = None
         for attempt in range(1, max_retries + 1):
-            result = self.client.close_position(trade["symbol"], trade["side"], trade["qty"])
+            result = self.client.close_position(symbol, trade["side"], close_qty)
             if result["success"]:
                 break
-            log.warning("%s %s: Kapatma denemesi %d/%d basarisiz: %s",
-                        trade["symbol"], trade["side"], attempt, max_retries, result.get("error", ""))
+            log.warning("%s %s: Kapatma denemesi %d/%d basarisiz: %s", symbol, trade["side"], attempt, max_retries, result.get("error", ""))
             if attempt < max_retries:
                 time.sleep(retry_delay)
 
         if not result or not result["success"]:
-            log.error("%s %s: Kapatma basarisiz (%s), sonraki tick'te tekrar denenecek",
-                      trade["symbol"], trade["side"], reason)
-            return
+            log.error("%s %s: Kapatma basarisiz (%s), pozisyon acik kaliyor", symbol, trade["side"], reason)
+            return None
 
-        pnl, pnl_pct = calc_pnl(trade["entry_price"], exit_price, trade["qty"], trade["side"])
+        self._finalize_close(trade, reason, exit_price)
+        return trade
+
+    def _finalize_close(self, trade, reason, exit_price):
+        pnl, pnl_pct = calc_pnl(trade["entry_price"], exit_price, trade["qty"], trade["side"], trade["margin"])
         duration = time.time() - trade["open_time"]
-        close_commission = abs(exit_price * trade["qty"]) * 0.00055
-        total_commission = trade["commission"] + close_commission
 
         with self._lock:
-            self.trades = [t for t in self.trades if t["id"] != trade["id"]]
+            self.trades.pop(trade["symbol"], None)
+            self._miss_counts.pop(trade["symbol"], None)
 
-        self._persist()
-
-        trade_history.record(
-            trade["symbol"], trade["side"], trade["entry_price"], exit_price,
-            trade["qty"], pnl, reason
-        )
+        trade_history.record(trade["symbol"], trade["side"], trade["entry_price"], exit_price, trade["qty"], pnl, reason)
 
         close_info = {
-            "symbol": trade["symbol"],
-            "side": trade["side"],
-            "entry_price": trade["entry_price"],
-            "exit_price": exit_price,
-            "qty": trade["qty"],
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "duration": duration,
-            "reason": reason,
-            "commission": total_commission,
+            "symbol": trade["symbol"], "side": trade["side"], "entry_price": trade["entry_price"],
+            "exit_price": exit_price, "qty": trade["qty"], "pnl": pnl, "pnl_pct": pnl_pct,
+            "duration": duration, "reason": reason,
         }
 
-        log.info("ISLEM KAPANDI: %s %s cikis=%.6f pnl=%.2f (%s)",
-                  trade["symbol"], trade["side"], exit_price, pnl, reason)
-
+        log.info("ISLEM KAPANDI: %s %s cikis=%.6f pnl=%.2f (%s)", trade["symbol"], trade["side"], exit_price, pnl, reason)
         if self.telegram:
             self.telegram.send_trade_closed(close_info)
 
-    # === RECONCILIATION ===
+    # === BORSA-TARAFLI KAPANIS ALGILAMA (spec §7: %4 SL kendiliginden tetiklenmesi) ===
 
-    def reconcile(self):
-        """Borsadaki gercek pozisyonlarla sanal islem toplamlarini karsilastirir,
-        buyuk sapma varsa gorunurluk icin uyarir (otomatik duzeltme yapmaz)."""
-        positions = self.client.get_positions()
+    def poll_exchange_closures(self):
+        """Cikis normalde sadece 1H mum kapanisinda Fisher ile olur; borsadaki
+        sabit %4 SL ise mumlar arasinda herhangi bir an tetiklenebilir. Bunu
+        algilamak icin takip edilen pozisyonlarin hala borsada olup olmadigi
+        kontrol edilir. 2 ardisik kayip sonrasi SL tetiklenmis kabul edilir
+        (gecici/eksik API yanitina karsi debounce)."""
         with self._lock:
-            internal_totals = {}
-            for t in self.trades:
-                key = (t["symbol"], t["side"])
-                internal_totals[key] = internal_totals.get(key, 0.0) + t["qty"]
+            tracked = {s: dict(t) for s, t in self.trades.items()}
+        if not tracked:
+            return
 
-        exchange_totals = {}
-        for pos in positions:
-            key = (pos["symbol"], pos["side"])
-            exchange_totals[key] = exchange_totals.get(key, 0.0) + pos["size"]
+        present = {(p["symbol"], p["side"]) for p in self.client.get_positions()}
 
-        all_keys = set(internal_totals) | set(exchange_totals)
-        for key in all_keys:
-            internal_qty = internal_totals.get(key, 0.0)
-            exchange_qty = exchange_totals.get(key, 0.0)
-            if abs(internal_qty - exchange_qty) > max(internal_qty, exchange_qty) * 0.01 + 1e-9:
-                symbol, side = key
-                log.warning("Uyusmazlik: %s %s bot=%.6f borsa=%.6f", symbol, side, internal_qty, exchange_qty)
-                if self.telegram:
-                    self.telegram.send_reconcile_warning(symbol, side, internal_qty, exchange_qty)
+        for symbol, trade in tracked.items():
+            key = (symbol, trade["side"])
+            if key in present:
+                self._miss_counts[symbol] = 0
+                continue
+            self._miss_counts[symbol] = self._miss_counts.get(symbol, 0) + 1
+            if self._miss_counts[symbol] >= 2:
+                self._handle_sl_closure(trade)
 
-    # === STATE PERSISTENCE ===
-
-    def to_dict(self):
+    def _handle_sl_closure(self, trade):
+        symbol = trade["symbol"]
         with self._lock:
-            return {"trades": [dict(t) for t in self.trades], "next_id": self._next_id}
+            if symbol not in self.trades:
+                return
 
-    def from_dict(self, data):
-        with self._lock:
-            self.trades = list((data or {}).get("trades", []))
-            self._next_id = (data or {}).get("next_id", 1)
+        exit_price = trade["sl_price"]
+        try:
+            closed = self.client.get_closed_pnl(symbol=symbol, limit=5)
+            bybit_side = "Buy" if trade["side"] == "long" else "Sell"
+            for c in closed:
+                if c.get("side") != bybit_side:
+                    continue
+                if int(c.get("updatedTime", 0)) >= int(trade["open_time"] * 1000):
+                    if c.get("avgExitPrice"):
+                        exit_price = float(c["avgExitPrice"])
+                    break
+        except Exception as e:
+            log.warning("%s: get_closed_pnl okunamadi, sl_price ile hesaplanacak: %s", symbol, e)
+
+        log.info("STOP-LOSS TETIKLENDI: %s %s cikis~=%.6f", symbol, trade["side"], exit_price)
+        self._finalize_close(trade, "stop_loss", exit_price)

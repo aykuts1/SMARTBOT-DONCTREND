@@ -1,43 +1,37 @@
 {
-    "_aciklama": "Trade Bot Parametre Dosyasi - Stokastik+MACD flag stratejisi",
+    "_aciklama": "Trade Bot Parametre Dosyasi - Fisher Transform(1H) + EMA(21/50/100, 1H) + MACD(9/21 EMA karsilastirmasi, 4H) stratejisi",
 
     "global": {
-        "kaldirac": 20,
-        "marjin_orani": 0.05,
-        "guvenlik_sl_orani": 0.05,
-        "rr_orani": 2.5,
-        "max_atr_carpani": 2,
-        "flag_gecerlilik_mum": 5,
-        "timeframe": "15",
-        "baslangic_mum_sayisi": 200,
+        "kaldirac": 25,
+        "marjin_orani": 0.10,
+        "sl_orani": 0.04,
+        "timeframe_1h": "60",
+        "timeframe_4h": "240",
+        "baslangic_mum_sayisi_1h": 200,
+        "baslangic_mum_sayisi_4h": 100,
         "coin_listesi": [
-            "XRPUSDT", "TRXUSDT", "ADAUSDT",
-            "AVAXUSDT", "DOGEUSDT", "SOLUSDT", "ATOMUSDT", "NEARUSDT",
-            "HYPEUSDT", "WLDUSDT", "SUIUSDT", "DOTUSDT", "DEXEUSDT",
-            "UNIUSDT", "AAVEUSDT", "BNBUSDT", "LTCUSDT", "LINKUSDT", "APTUSDT", "TRUMPUSDT"
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "AVAXUSDT", "WLDUSDT", "ONDOUSDT",
+            "SUIUSDT", "HYPEUSDT", "INJUSDT", "ATOMUSDT", "XRPUSDT", "AAVEUSDT", "BNBUSDT",
+            "DOGEUSDT", "ENAUSDT", "TAOUSDT", "TRXUSDT", "NEARUSDT", "OPUSDT", "TIAUSDT",
+            "LTCUSDT", "ARBUSDT", "APTUSDT", "UNIUSDT", "TRUMPUSDT", "SHIBUSDT", "1000PEPEUSDT"
         ],
-        "max_toplam_islem": 20,
-        "max_coin_yon_basi_islem": 2,
-        "islem_acma_deneme": 3,
+        "maks_toplam_islem": 5,
+        "islem_deneme": 3,
         "islem_acma_bekleme_sn": 2,
         "islem_kapatma_bekleme_sn": 2
     },
 
     "indicators": {
-        "stokastik_k_uzunluk": 50,
-        "stokastik_k_smooth": 21,
-        "stokastik_d_smooth": 8,
-        "macd_hizli": 21,
-        "macd_yavas": 50,
-        "macd_sinyal": 9,
-        "bollinger_uzunluk": 20,
-        "bollinger_stddev": 2,
-        "atr_uzunluk": 14
+        "fisher_uzunluk": 9,
+        "ema_kisa": 21,
+        "ema_orta": 50,
+        "ema_uzun": 100,
+        "macd_hizli": 9,
+        "macd_yavas": 21
     },
 
     "telegram": {
         "aktif": true,
-        "rapor_1s": true,
         "rapor_6s": true,
         "rapor_24s": true
     }

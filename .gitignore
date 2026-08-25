@@ -1,5 +1,4 @@
 .claude/settings.local.json
-bot_state.json
 trade_history.json
 __pycache__/
 *.pyc

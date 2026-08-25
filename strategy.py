@@ -1,62 +1,47 @@
 from logger_setup import get_logger
-from indicators import compute_signals
+import indicators
 
 log = get_logger("strategy")
 
 
-def on_candle_close(symbol, candle, data_pool, flag_manager, config):
-    """Spesifikasyon §2-5: kesisim tespiti -> flag onayi -> lose/win exit hesaplama.
-    Onaylanan yonler icin acilacak islem isteklerini dondurur."""
-    candles = data_pool.get_candles(symbol)
-    signals = compute_signals(candles, config)
-    if not signals:
-        return []
+def on_1h_candle_close(symbol, candle, pool_1h, pool_4h, trade_manager, telegram, config):
+    """Spec §5-6: Fisher(1H) kesisimi tetikleyici, EMA(21/50/100, 1H) ve
+    MACD(4H, cache'lenmis) onaylari. Ucu de ayni yonde ise islem acilir.
+    Cikis SADECE Fisher ters kesimiyle yapilir; ayni mum kapanisinda
+    kapatma sonrasi yeni yonde kosullar tutuyorsa ayni mumda yeni islem
+    acilir (flip, iki ayri adim olarak)."""
+    ind = indicators.compute_1h_signals(pool_1h.get_candles(symbol), config)
+    if not ind:
+        return
+    pool_1h.set_indicators(symbol, ind)
 
-    data_pool.set_indicators(symbol, signals)
+    if not (ind["fisher_cross_up"] or ind["fisher_cross_down"]):
+        return
 
-    directions = flag_manager.process_candle_close(
-        symbol,
-        signals["stoch_cross_up"], signals["stoch_cross_down"],
-        signals["macd_cross_up"], signals["macd_cross_down"]
-    )
-    if not directions:
-        return []
+    trigger_dir = "long" if ind["fisher_cross_up"] else "short"
+    ema_dir = ind["ema_direction"]
+    macd_dir = pool_4h.get_indicators(symbol).get("macd_direction")
 
-    cfg = config.get("global", {})
-    rr_ratio = cfg.get("rr_orani", 2.5)
-    max_atr_mult = cfg.get("max_atr_carpani", 3)
+    existing = trade_manager.get_trade(symbol)
+    if existing:
+        if existing["side"] == trigger_dir:
+            return  # zaten bu yonde pozisyon acik
+        closed = trade_manager.close_trade(symbol, "fisher_ters_kesim", candle["close"])
+        if not closed:
+            return  # kapatma basarisiz, bu mumda yeni yon acilmaz
 
-    entry_price = candle["close"]
-    atr = signals["atr"][-1]
-    bb_upper = signals["bb_upper"][-1]
-    bb_lower = signals["bb_lower"][-1]
-    max_dist = max_atr_mult * atr
+    entry_ok = (ema_dir == trigger_dir) and (macd_dir == trigger_dir)
+    if not entry_ok:
+        if telegram:
+            telegram.send_signal_mismatch_skip(symbol, trigger_dir, ema_dir, macd_dir)
+        return
 
-    requests = []
-    for direction in directions:
-        if direction == "long":
-            lose_exit = bb_lower
-            if entry_price - lose_exit > max_dist:
-                lose_exit = entry_price - max_dist
-            dist = entry_price - lose_exit
-            win_exit = entry_price + rr_ratio * dist
-        else:
-            lose_exit = bb_upper
-            if lose_exit - entry_price > max_dist:
-                lose_exit = entry_price + max_dist
-            dist = lose_exit - entry_price
-            win_exit = entry_price - rr_ratio * dist
+    trade_manager.open_trade({"symbol": symbol, "side": trigger_dir, "entry_price": candle["close"]})
 
-        if dist <= 0:
-            log.warning("%s %s: gecersiz mesafe (dist=%.6f), sinyal atlaniyor", symbol, direction, dist)
-            continue
 
-        requests.append({
-            "symbol": symbol,
-            "side": direction,
-            "entry_price": entry_price,
-            "lose_exit": lose_exit,
-            "win_exit": win_exit,
-        })
-
-    return requests
+def on_4h_candle_close(symbol, pool_4h, config):
+    """Spec §3.2: 4 saatlik MACD onay yonunu hesaplar ve cache'ler. Islem
+    acmaz/kapatmaz. Cagirmadan once ilgili mum pool_4h'a eklenmis olmali."""
+    prev_direction = pool_4h.get_indicators(symbol).get("macd_direction")
+    result = indicators.compute_4h_macd(pool_4h.get_candles(symbol), config, prev_direction)
+    pool_4h.set_indicators(symbol, result)

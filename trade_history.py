@@ -17,7 +17,7 @@ def record(symbol, side, entry_price, exit_price, qty, pnl, reason):
         "exit_price": exit_price,
         "qty": qty,
         "pnl": pnl,
-        "reason": reason
+        "reason": reason,
     }
     with _lock:
         records = _load()
